@@ -1,6 +1,7 @@
 import random
 import numpy as np
 import math
+from scipy.special import digamma
 
 # random crap that should be factored out later
 lu=2
@@ -15,8 +16,8 @@ class OnlineCTR(object):
         self.K = num_topics
         self.U = num_users
         self.T = vocab_size
-        self.J = 100  # number of iterations for Gibbs sampling
-        self.JB = 20  # number of burn in iterations
+        self.J = 4   # number of iterations for Gibbs sampling
+        self.JB = 1  # number of burn in iterations
         
     def initialize(self, corpus):
         '''
@@ -25,11 +26,13 @@ class OnlineCTR(object):
         
         corkus.random01() is equivalent to random.random()
         # https://stackoverflow.com/questions/43077030/mersenne-twister-in-python
-        word -> words assigned to topics -> topic counts per document
+        words -> words assigned to topics -> topic counts per document
         corpus -> Z -> CDK
         
+        Note the two alternative weight calculations in update_z_joint() !!
+        
         has to be a better OO way of doing this
-        rather than index values passed everywhere        
+        rather than index values passed everywhere       
         '''
         self.corpus = corpus
         self.V = len(corpus)                              # number of documents        
@@ -72,6 +75,11 @@ class OnlineCTR(object):
         self.stat_phi_list_k = []
         self.stat_phi_list_t = []
         
+        # parallels phi
+        # maybe initial values aren't right
+        # https://github.com/kzhai/PyLDA/blob/master/hybrid.py
+        self.gamma = 1 * np.random.gamma(100., 1./100., (self.K, self.T))
+        
     def feed_one(self, user_index, item_index, rating):
         '''
         Given a rating,
@@ -87,7 +95,7 @@ class OnlineCTR(object):
     def update_topic_modeling(self, item_index):
         # Gibbs sampling!
         # Given one document, pretend the entire corpus consists of this one document
-        # and update the probabilities accordingly (where did I see this again?)
+        # and update the probabilities accordingly (I think)
         for j in range(self.J):
             self.update_z_joint(item_index)            
             if j < self.JB:
@@ -100,10 +108,12 @@ class OnlineCTR(object):
         document = self.corpus[item_index]
         weights = np.zeros(self.K)
         N = len(document)
+        cdk = self.CDK[item_index]
         
         for word_index in range(N):
             word_id = document[word_index]
-            self.CDK[item_index][ self.Z[item_index][word_index] ] -= 1;
+            word_k = self.Z[item_index][word_index]
+            cdk[word_k] -= 1
             
             for k in range(self.K):
                 if k == 0:
@@ -111,20 +121,33 @@ class OnlineCTR(object):
                 else:
                     cul = weights[k-1]
                 weights[k] = (
-                    cul + (self.CDK[item_index][k] + a0)
-                    * (b0 + self.phi[k][word_id])/(b0 * self.T + self.phi_sum[k])
-                    * math.exp(0.5/sv/sv/(float(N)*(2.0*self.V_mean[item_index][k]-(1.0+2.0*self.CDK[item_index][k])/float(N))))
+                    cul + (cdk[k] + a0)
+                    
+                    # strategy 1 variational optimal distribution
+                    # references: 
+                    # https://github.com/blei-lab/onlineldavb/blob/master/onlineldavb.py#L34
+                    # https://github.com/blei-lab/onlineldavb/blob/master/onlineldavb.py#L135 
+                    # https://arxiv.org/pdf/1601.00670.pdf  (eq 59)
+                    # https://arxiv.org/pdf/1206.7051.pdf (eq 29)
+                    # BUT WHERE IS GAMMA UPDATED? Does it need to be updated?
+                    * math.exp(digamma(b0+self.gamma[k][word_id])-digamma(b0*self.T+self.gamma[k,:].sum()))
+                    
+                    # strategy 2 approximation that does not require digamma()
+                    # No idea where this comes from
+                    # * (b0 + self.phi[k][word_id])/(b0 * self.T + self.phi_sum[k])
+                    * math.exp(0.5/sv/sv/(float(N)*(2.0*self.V_mean[item_index][k]-(1.0+2.0*cdk[k])/float(N))))
                     )
             # abnormality tests
             
             # wtf is happening here?
             # find a weight that is that is biggest so far (?)
+            # this whole weight update section is just weird
             sel = weights[self.K-1] * np.random.random()
             seli = 0
             while(weights[seli] < sel):
                 seli += 1
             self.Z[item_index][word_index] = seli
-            self.CDK[item_index][ self.Z[item_index][word_index] ] += 1;
+            cdk[word_k] += 1
             
     def collect_phi(self, reset, item_index):
         if reset:
@@ -191,5 +214,4 @@ class OnlineCTR(object):
                          v_cov_mix[k] / lu / lu * u_mean[k] * mult)
             u_cov[k] = new_u_cov[k]
             u_mean[k] += new_u_mean[k]  # oh this + is interesting
-            v_cov[k] = new_v_cov[k];
-
+            v_cov[k] = new_v_cov[k]
